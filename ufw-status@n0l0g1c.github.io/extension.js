@@ -13,13 +13,10 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
+Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
+
 const POLL_MS = 15 * 1000;
 
-/**
- * @param {string} key
- * @param {string} value
- * @param {string} [style]
- */
 class StatusRow extends PopupMenu.PopupBaseMenuItem {
     static {
         GObject.registerClass(this);
@@ -45,21 +42,12 @@ class StatusRow extends PopupMenu.PopupBaseMenuItem {
         this.add_child(this._val);
     }
 
-    /**
-     * @param {string} text
-     * @param {string} [style]
-     */
     setValue(text, style = '') {
         this._val.text = text;
         this._val.style_class = `ufw-val ${style}`.trim();
     }
 }
 
-/**
- * Run a command and capture stdout (best-effort, non-interactive).
- * @param {string[]} argv
- * @returns {Promise<{ok: boolean, stdout: string, stderr: string, status: number}>}
- */
 function runCommand(argv) {
     return new Promise(resolve => {
         try {
@@ -97,10 +85,6 @@ function runCommand(argv) {
     });
 }
 
-/**
- * @param {string} confText
- * @returns {boolean|null}
- */
 function parseUfwConfEnabled(confText) {
     const m = confText.match(/^\s*ENABLED\s*=\s*(yes|no)/mi);
     if (!m)
@@ -108,10 +92,6 @@ function parseUfwConfEnabled(confText) {
     return m[1].toLowerCase() === 'yes';
 }
 
-/**
- * @param {string} text
- * @returns {{active: boolean|null, defaultIncoming: string, defaultOutgoing: string, rules: string[], raw: string}}
- */
 function parseUfwStatus(text) {
     const result = {
         active: null,
@@ -126,9 +106,7 @@ function parseUfwStatus(text) {
     else if (lower.includes('status: inactive'))
         result.active = false;
 
-    const defIn = text.match(/Default:\s*([a-z]+)\s*\(incoming\)/i);
-    const defOut = text.match(/Default:\s*[a-z]+\s*\(incoming\),\s*([a-z]+)\s*\(outgoing\)/i);
-    // UFW prints: Default: deny (incoming), allow (outgoing), disabled (routed)
+    // e.g. Default: deny (incoming), allow (outgoing), disabled (routed)
     const defLine = text.match(/Default:\s*(.+)/i);
     if (defLine) {
         const inc = defLine[1].match(/([a-z]+)\s*\(incoming\)/i);
@@ -138,13 +116,14 @@ function parseUfwStatus(text) {
         if (out)
             result.defaultOutgoing = out[1];
     } else {
+        const defIn = text.match(/Default:\s*([a-z]+)\s*\(incoming\)/i);
+        const defOut = text.match(/Default:\s*[a-z]+\s*\(incoming\),\s*([a-z]+)\s*\(outgoing\)/i);
         if (defIn)
             result.defaultIncoming = defIn[1];
         if (defOut)
             result.defaultOutgoing = defOut[1];
     }
 
-    // Collect non-header lines that look like rules
     for (const line of text.split('\n')) {
         const t = line.trim();
         if (!t)
@@ -186,8 +165,8 @@ class UfwStatusIndicator extends PanelMenu.Button {
         this.add_child(box);
 
         this._pollSource = 0;
+        this._menuOpenId = 0;
         this._refreshing = false;
-        /** @type {{active: boolean|null, defaultIncoming: string, defaultOutgoing: string, rules: string[], source: string}} */
         this._state = {
             active: null,
             defaultIncoming: '—',
@@ -257,7 +236,7 @@ class UfwStatusIndicator extends PanelMenu.Button {
         hint.label.add_style_class_name('ufw-hint');
         this.menu.addMenuItem(hint);
 
-        this.menu.connect('open-state-changed', (_m, open) => {
+        this._menuOpenId = this.menu.connect('open-state-changed', (_m, open) => {
             if (open)
                 this._refresh().catch(e => logError(e));
         });
@@ -272,24 +251,28 @@ class UfwStatusIndicator extends PanelMenu.Button {
     }
 
     destroy() {
+        if (this._menuOpenId) {
+            this.menu.disconnect(this._menuOpenId);
+            this._menuOpenId = 0;
+        }
         if (this._pollSource) {
-            try { GLib.Source.remove(this._pollSource); } catch { /* already removed */ }
+            try {
+                GLib.Source.remove(this._pollSource);
+            } catch {
+                // already gone
+            }
             this._pollSource = 0;
         }
         super.destroy();
     }
 
     _openGufw() {
-        const candidates = ['gufw', 'firewall-config'];
-        for (const cmd of candidates) {
+        for (const cmd of ['gufw', 'firewall-config']) {
             const path = GLib.find_program_in_path(cmd);
             if (!path)
                 continue;
             try {
-                Gio.Subprocess.new(
-                    [path],
-                    Gio.SubprocessFlags.NONE
-                );
+                Gio.Subprocess.new([path], Gio.SubprocessFlags.NONE);
                 return;
             } catch (e) {
                 logError(e, `UFW Status: failed to launch ${cmd}`);
@@ -307,7 +290,6 @@ class UfwStatusIndicator extends PanelMenu.Button {
         this._refreshing = true;
 
         try {
-            // Prefer live `ufw status`
             const ufwPath = GLib.find_program_in_path('ufw');
             if (ufwPath) {
                 const res = await runCommand([ufwPath, 'status']);
@@ -323,7 +305,7 @@ class UfwStatusIndicator extends PanelMenu.Button {
                     this._applyState();
                     return;
                 }
-                // Permission denied — try conf file
+
                 if (res.stderr.toLowerCase().includes('permission') ||
                     res.status !== 0) {
                     const conf = await this._readUfwConf();
@@ -343,7 +325,6 @@ class UfwStatusIndicator extends PanelMenu.Button {
                 }
             }
 
-            // Fallback: conf only
             const conf = await this._readUfwConf();
             if (conf !== null) {
                 this._state = {
@@ -357,7 +338,6 @@ class UfwStatusIndicator extends PanelMenu.Button {
                 return;
             }
 
-            // nftables presence hint
             const nft = GLib.find_program_in_path('nft');
             if (nft) {
                 const res = await runCommand([nft, 'list', 'ruleset']);
@@ -391,15 +371,12 @@ class UfwStatusIndicator extends PanelMenu.Button {
         }
     }
 
-    /**
-     * @returns {Promise<boolean|null>}
-     */
     async _readUfwConf() {
         try {
             const file = Gio.File.new_for_path('/etc/ufw/ufw.conf');
             if (!file.query_exists(null))
                 return null;
-            const [, bytes] = file.load_contents(null);
+            const [, bytes] = await file.load_contents_async(null);
             return parseUfwConfEnabled(new TextDecoder().decode(bytes));
         } catch {
             return null;
@@ -467,10 +444,6 @@ class UfwStatusIndicator extends PanelMenu.Button {
 }
 
 export default class UfwStatusExtension extends Extension {
-    /**
-     * @param {string} role
-     * @param {import('resource:///org/gnome/shell/ui/panelMenu.js').Button} indicator
-     */
     _addToPanel(role, indicator) {
         const existing = Main.panel.statusArea[role];
         if (existing) {

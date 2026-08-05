@@ -1,7 +1,7 @@
 {
   "uuid": "ufw-status@n0l0g1c.github.io",
   "name": "UFW Status",
-  "description": "Top-panel UFW firewall status: active or inactive, default incoming/outgoing policies when available, and a short rules snapshot. Can open gufw or firewall-config if installed.\n\nRuns the system ufw binary as a non-privileged status query (read-only). If that is not permitted, falls back to reading /etc/ufw/ufw.conf. Does not enable or disable the firewall and does not run privileged helpers. No network access and no telemetry.",
+  "description": "Top-panel UFW firewall status: active or inactive, default incoming/outgoing policies when available, and a short rules snapshot. Can open gufw or firewall-config if installed.\n\nRuns the system ufw binary as a non-privileged status query (read-only). If that is not permitted, falls back to reading /etc/ufw/ufw.conf. Does not enable or disable the firewall and does not run privileged helpers. No network access and no telemetry.\n\nClipboard access: optional \"Copy status command\" writes `sudo ufw status verbose` to the clipboard only when you click it. No automatic clipboard reading.",
   "shell-version": [
     "45",
     "46",
