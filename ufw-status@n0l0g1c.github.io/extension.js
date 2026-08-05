@@ -457,18 +457,36 @@ class UfwStatusIndicator extends PanelMenu.Button {
         }
 
         const now = GLib.DateTime.new_now_local();
-        if (!this._statusItem.label.text.startsWith('Limited') &&
-            !this._statusItem.label.text.startsWith('UFW not') &&
-            !this._statusItem.label.text.startsWith('Error')) {
+        const prev = this._statusItem.label.text || '';
+        if (!prev.startsWith('Limited') &&
+            !prev.startsWith('UFW not') &&
+            !prev.startsWith('Error')) {
             this._statusItem.label.text = `Updated ${now.format('%H:%M:%S')}`;
         }
     }
 }
 
 export default class UfwStatusExtension extends Extension {
+    /**
+     * @param {string} role
+     * @param {import('resource:///org/gnome/shell/ui/panelMenu.js').Button} indicator
+     */
+    _addToPanel(role, indicator) {
+        try {
+            Main.panel.addToStatusArea(role, indicator);
+        } catch {
+            try {
+                Main.panel.statusArea[role]?.destroy();
+            } catch {
+                // ignore
+            }
+            Main.panel.addToStatusArea(role, indicator);
+        }
+    }
+
     enable() {
         this._indicator = new UfwStatusIndicator();
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
+        this._addToPanel(this.uuid, this._indicator);
         this._indicator.start();
     }
 
