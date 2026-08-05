@@ -50,38 +50,30 @@ class StatusRow extends PopupMenu.PopupBaseMenuItem {
 
 function runCommand(argv) {
     return new Promise(resolve => {
+        let proc;
         try {
-            const proc = Gio.Subprocess.new(
+            proc = Gio.Subprocess.new(
                 argv,
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
             );
-            proc.communicate_utf8_async(null, null, (p, res) => {
-                try {
-                    const [, stdout, stderr] = p.communicate_utf8_finish(res);
-                    const status = p.get_exit_status();
-                    resolve({
-                        ok: status === 0,
-                        stdout: stdout || '',
-                        stderr: stderr || '',
-                        status,
-                    });
-                } catch (e) {
-                    resolve({
-                        ok: false,
-                        stdout: '',
-                        stderr: String(e.message || e),
-                        status: -1,
-                    });
-                }
-            });
         } catch (e) {
-            resolve({
-                ok: false,
-                stdout: '',
-                stderr: String(e.message || e),
-                status: -1,
-            });
+            resolve({ok: false, stdout: '', stderr: String(e.message || e), status: -1});
+            return;
         }
+        proc.communicate_utf8_async(null, null, (p, res) => {
+            try {
+                const [, stdout, stderr] = p.communicate_utf8_finish(res);
+                const status = p.get_exit_status();
+                resolve({
+                    ok: status === 0,
+                    stdout: stdout || '',
+                    stderr: stderr || '',
+                    status,
+                });
+            } catch (e) {
+                resolve({ok: false, stdout: '', stderr: String(e.message || e), status: -1});
+            }
+        });
     });
 }
 
@@ -98,7 +90,6 @@ function parseUfwStatus(text) {
         defaultIncoming: '—',
         defaultOutgoing: '—',
         rules: [],
-        raw: text,
     };
     const lower = text.toLowerCase();
     if (lower.includes('status: active'))
@@ -106,7 +97,6 @@ function parseUfwStatus(text) {
     else if (lower.includes('status: inactive'))
         result.active = false;
 
-    // e.g. Default: deny (incoming), allow (outgoing), disabled (routed)
     const defLine = text.match(/Default:\s*(.+)/i);
     if (defLine) {
         const inc = defLine[1].match(/([a-z]+)\s*\(incoming\)/i);
@@ -115,13 +105,6 @@ function parseUfwStatus(text) {
             result.defaultIncoming = inc[1];
         if (out)
             result.defaultOutgoing = out[1];
-    } else {
-        const defIn = text.match(/Default:\s*([a-z]+)\s*\(incoming\)/i);
-        const defOut = text.match(/Default:\s*[a-z]+\s*\(incoming\),\s*([a-z]+)\s*\(outgoing\)/i);
-        if (defIn)
-            result.defaultIncoming = defIn[1];
-        if (defOut)
-            result.defaultOutgoing = defOut[1];
     }
 
     for (const line of text.split('\n')) {
@@ -256,11 +239,7 @@ class UfwStatusIndicator extends PanelMenu.Button {
             this._menuOpenId = 0;
         }
         if (this._pollSource) {
-            try {
-                GLib.Source.remove(this._pollSource);
-            } catch {
-                // already gone
-            }
+            GLib.Source.remove(this._pollSource);
             this._pollSource = 0;
         }
         super.destroy();
@@ -271,12 +250,8 @@ class UfwStatusIndicator extends PanelMenu.Button {
             const path = GLib.find_program_in_path(cmd);
             if (!path)
                 continue;
-            try {
-                Gio.Subprocess.new([path], Gio.SubprocessFlags.NONE);
-                return;
-            } catch (e) {
-                logError(e, `UFW Status: failed to launch ${cmd}`);
-            }
+            Gio.Subprocess.new([path], Gio.SubprocessFlags.NONE);
+            return;
         }
         Main.notify(
             'UFW Status',
@@ -444,28 +419,17 @@ class UfwStatusIndicator extends PanelMenu.Button {
 }
 
 export default class UfwStatusExtension extends Extension {
-    _addToPanel(role, indicator) {
-        const existing = Main.panel.statusArea[role];
-        if (existing) {
-            try {
-                existing.destroy();
-            } catch {
-                // ignore
-            }
-            if (Main.panel.statusArea[role])
-                delete Main.panel.statusArea[role];
-        }
-        Main.panel.addToStatusArea(role, indicator);
-    }
 
     enable() {
         this._indicator = new UfwStatusIndicator();
-        this._addToPanel(this.uuid, this._indicator);
+        Main.panel.addToStatusArea(this.uuid, this._indicator);
         this._indicator.start();
     }
 
     disable() {
-        this._indicator?.destroy();
-        this._indicator = null;
+        if (this._indicator) {
+            this._indicator.destroy();
+            this._indicator = null;
+        }
     }
 }
