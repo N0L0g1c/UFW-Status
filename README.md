@@ -2,6 +2,8 @@
 
 GNOME Shell extension: top-panel **UFW firewall status** (active/inactive, defaults, rules snapshot).
 
+![Screenshot](screenshots/screenshot.png)
+
 ## Features
 
 - Panel badge: **ON** (active) / **OFF** (inactive)
@@ -16,7 +18,7 @@ GNOME Shell extension: top-panel **UFW firewall status** (active/inactive, defau
 - GNOME Shell **45–50**
 - Optional: `ufw`, `gufw`
 
-## Install (local)
+## Install
 
 ```bash
 UUID=ufw-status@n0l0g1c.github.io
@@ -25,7 +27,7 @@ cp -a "$UUID" ~/.local/share/gnome-shell/extensions/
 gnome-extensions enable "$UUID"
 ```
 
-On Wayland, log out and back in so the shell discovers a newly copied UUID, then enable it.
+Log out/in on Wayland (or restart GNOME Shell) so the extension is discovered.
 
 ## How status is read
 
@@ -35,28 +37,24 @@ On Wayland, log out and back in so the shell discovers a newly copied UUID, then
 
 The extension **does not** enable or disable the firewall and **does not** run `pkexec` or other privileged helpers. Use gufw or `sudo ufw` for policy changes.
 
-## Publish to extensions.gnome.org
+## Screenshots
 
-Follows the [EGO review guidelines](https://gjs.guide/extensions/review-guidelines/review-guidelines.html):
-
-| Requirement | How this extension complies |
+| File | Contents |
 |---|---|
-| GPL-compatible license | GPL-2.0-or-later (`LICENSE`) |
-| External binaries | Only calls the system `ufw` / `nft` / GUI tools already on PATH; no bundled binaries |
-| Processes exit cleanly | `Gio.Subprocess` with stdout/stderr pipes; no interactive prompts |
-| Privileged subprocesses | None (status is best-effort unprivileged) |
-| Lifecycle | Poll timer removed in `disable()` |
-| No telemetry | No network access |
-| Zip contents | Runtime files only (`./pack.sh`) |
+| [`screenshots/screenshot.png`](screenshots/screenshot.png) | Primary store image — firewall active |
+| [`screenshots/screenshot-off.png`](screenshots/screenshot-off.png) | Firewall inactive |
+| [`screenshots/icon.png`](screenshots/icon.png) | Optional icon asset |
 
-### Package for upload
+## Packaging
 
 ```bash
 ./pack.sh
-# produces: ufw-status@n0l0g1c.github.io.shell-extension.zip
+# → ufw-status@n0l0g1c.github.io.shell-extension.zip
 ```
 
-Upload at [extensions.gnome.org](https://extensions.gnome.org/).
+Zip contents: `metadata.json`, `extension.js`, `stylesheet.css`, `LICENSE`.
+
+This project follows the [GNOME Shell extension review guidelines](https://gjs.guide/extensions/review-guidelines/review-guidelines.html) (no bundled binaries, unprivileged status only, processes exit cleanly, lifecycle cleanup, GPL-2.0-or-later).
 
 ## Development
 
