@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* ufw status in the panel */
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -14,295 +15,215 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
 
-const POLL_MS = 15000;
-
-class Row extends PopupMenu.PopupBaseMenuItem {
-    static { GObject.registerClass(this); }
-
-    constructor(label) {
-        super({reactive: false, can_focus: false, style_class: 'ufw-row'});
-        this.add_child(new St.Label({
-            text: label,
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'ufw-key',
-        }));
-        this._val = new St.Label({
-            text: '…',
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'ufw-val',
-            x_expand: true,
-        });
-        this.add_child(this._val);
-    }
-
-    set(text, extra = '') {
-        this._val.text = text;
-        this._val.style_class = extra ? `ufw-val ${extra}` : 'ufw-val';
-    }
-}
-
-function spawn(argv) {
-    return new Promise(resolve => {
+function run(argv) {
+    return new Promise((resolve, reject) => {
         let proc;
         try {
-            proc = Gio.Subprocess.new(
-                argv,
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-            );
+            proc = Gio.Subprocess.new(argv,
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
         } catch (e) {
-            resolve({ok: false, out: '', err: String(e)});
+            reject(e);
             return;
         }
         proc.communicate_utf8_async(null, null, (p, res) => {
             try {
-                const [, out, err] = p.communicate_utf8_finish(res);
-                resolve({ok: p.get_exit_status() === 0, out: out || '', err: err || ''});
+                const [, stdout, stderr] = p.communicate_utf8_finish(res);
+                resolve({
+                    code: p.get_exit_status(),
+                    stdout: stdout || '',
+                    stderr: stderr || '',
+                });
             } catch (e) {
-                resolve({ok: false, out: '', err: String(e)});
+                reject(e);
             }
         });
     });
 }
 
-function parseStatus(text) {
-    const info = {active: null, incoming: '—', outgoing: '—', rules: []};
-    const low = text.toLowerCase();
-    if (low.includes('status: active'))
-        info.active = true;
-    else if (low.includes('status: inactive'))
-        info.active = false;
-
-    const def = text.match(/Default:\s*(.+)/i);
-    if (def) {
-        const inc = def[1].match(/([a-z]+)\s*\(incoming\)/i);
-        const out = def[1].match(/([a-z]+)\s*\(outgoing\)/i);
-        if (inc)
-            info.incoming = inc[1];
-        if (out)
-            info.outgoing = out[1];
-    }
-
-    for (const line of text.split('\n')) {
-        const t = line.trim();
-        if (!t || t.length < 5)
-            continue;
-        if (/^(Status:|Default:|To\s+Action|Logging:|--)/i.test(t))
-            continue;
-        info.rules.push(t);
-    }
-    return info;
-}
-
+const Indicator = GObject.registerClass(
 class Indicator extends PanelMenu.Button {
-    static { GObject.registerClass(this); }
+    _init() {
+        super._init(0.0, 'UFW Status');
 
-    constructor() {
-        super(0.5, 'UFW Status', false);
-
-        const box = new St.BoxLayout({style_class: 'panel-status-menu-box'});
         this._icon = new St.Icon({
             icon_name: 'security-medium-symbolic',
             style_class: 'system-status-icon',
         });
-        this._label = new St.Label({
+        this._text = new St.Label({
             text: 'UFW',
+            y_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'ufw-panel-label',
         });
+        const box = new St.BoxLayout();
         box.add_child(this._icon);
-        box.add_child(this._label);
+        box.add_child(this._text);
         this.add_child(box);
 
-        this._busy = false;
-        this._timer = 0;
-        this._openId = 0;
-
-        this._fw = new Row('Firewall');
-        this._in = new Row('Incoming');
-        this._out = new Row('Outgoing');
-        this._src = new Row('Source');
-        this.menu.addMenuItem(this._fw);
+        this._state = new PopupMenu.PopupMenuItem('…', {reactive: false});
+        this._in = new PopupMenu.PopupMenuItem('Incoming: …', {reactive: false});
+        this._out = new PopupMenu.PopupMenuItem('Outgoing: …', {reactive: false});
+        this.menu.addMenuItem(this._state);
         this.menu.addMenuItem(this._in);
         this.menu.addMenuItem(this._out);
-        this.menu.addMenuItem(this._src);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this._rules = new PopupMenu.PopupMenuSection();
-        const scroll = new St.ScrollView({
-            style_class: 'vfade ufw-scroll',
-            overlay_scrollbars: true,
-            x_expand: true,
-            child: this._rules.box,
-        });
-        scroll._delegate = this._rules;
-        this._rules.actor = scroll;
         this.menu.addMenuItem(this._rules);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        const refresh = new PopupMenu.PopupMenuItem('Refresh');
-        refresh.connect('activate', () => this._poll().catch(e => logError(e)));
-        this.menu.addMenuItem(refresh);
+        let item = new PopupMenu.PopupMenuItem('Refresh');
+        item.connect('activate', () => {
+            this._update();
+        });
+        this.menu.addMenuItem(item);
 
-        const gufw = new PopupMenu.PopupMenuItem('Open gufw');
-        gufw.connect('activate', () => this._launchUi());
-        this.menu.addMenuItem(gufw);
+        item = new PopupMenu.PopupMenuItem('Open gufw');
+        item.connect('activate', () => {
+            const p = GLib.find_program_in_path('gufw') ||
+                GLib.find_program_in_path('firewall-config');
+            if (p)
+                Gio.Subprocess.new([p], Gio.SubprocessFlags.NONE);
+            else
+                Main.notify('UFW Status', 'gufw is not installed');
+        });
+        this.menu.addMenuItem(item);
 
-        const copy = new PopupMenu.PopupMenuItem('Copy status command');
-        copy.connect('activate', () => {
+        item = new PopupMenu.PopupMenuItem('Copy: sudo ufw status verbose');
+        item.connect('activate', () => {
             St.Clipboard.get_default().set_text(
-                St.ClipboardType.CLIPBOARD, 'sudo ufw status verbose');
-            Main.notify('UFW Status', 'Copied: sudo ufw status verbose');
+                St.ClipboardType.CLIPBOARD,
+                'sudo ufw status verbose');
         });
-        this.menu.addMenuItem(copy);
+        this.menu.addMenuItem(item);
 
-        this._note = new PopupMenu.PopupMenuItem('…', {reactive: false, can_focus: false});
-        this._note.label.add_style_class_name('ufw-status');
-        this.menu.addMenuItem(this._note);
+        this._footer = new PopupMenu.PopupMenuItem('', {reactive: false});
+        this.menu.addMenuItem(this._footer);
 
-        this._openId = this.menu.connect('open-state-changed', (_m, open) => {
+        this.menu.connect('open-state-changed', (_m, open) => {
             if (open)
-                this._poll().catch(e => logError(e));
+                this._update();
         });
-    }
 
-    start() {
-        this._poll().catch(e => logError(e));
-        this._timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, POLL_MS, () => {
-            this._poll().catch(e => logError(e));
+        this._timeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 20, () => {
+            this._update();
             return GLib.SOURCE_CONTINUE;
         });
+        this._update();
     }
 
     destroy() {
-        if (this._openId) {
-            this.menu.disconnect(this._openId);
-            this._openId = 0;
-        }
-        if (this._timer) {
-            GLib.Source.remove(this._timer);
-            this._timer = 0;
+        if (this._timeout) {
+            GLib.Source.remove(this._timeout);
+            this._timeout = 0;
         }
         super.destroy();
     }
 
-    _launchUi() {
-        for (const name of ['gufw', 'firewall-config']) {
-            const bin = GLib.find_program_in_path(name);
-            if (bin) {
-                Gio.Subprocess.new([bin], Gio.SubprocessFlags.NONE);
-                return;
-            }
-        }
-        Main.notify('UFW Status', 'Install gufw, or run: sudo ufw status verbose');
-    }
-
     async _readConf() {
-        try {
-            const file = Gio.File.new_for_path('/etc/ufw/ufw.conf');
-            if (!file.query_exists(null))
-                return null;
-            const [, bytes] = await file.load_contents_async(null);
-            const m = new TextDecoder().decode(bytes).match(/^\s*ENABLED\s*=\s*(yes|no)/mi);
-            return m ? m[1].toLowerCase() === 'yes' : null;
-        } catch {
+        const file = Gio.File.new_for_path('/etc/ufw/ufw.conf');
+        if (!file.query_exists(null))
             return null;
-        }
+        const [, contents] = await file.load_contents_async(null);
+        const m = new TextDecoder().decode(contents).match(/ENABLED=(yes|no)/i);
+        return m ? m[1].toLowerCase() === 'yes' : null;
     }
 
-    async _poll() {
-        if (this._busy)
-            return;
-        this._busy = true;
+    async _update() {
+        let active = null;
+        let incoming = '?';
+        let outgoing = '?';
+        let rules = [];
+        let note = '';
+
         try {
-            const ufw = GLib.find_program_in_path('ufw');
-            if (ufw) {
-                const res = await spawn([ufw, 'status']);
-                if (res.ok || res.out.includes('Status:')) {
-                    this._show(parseStatus(res.out), 'ufw status');
-                    return;
+            const bin = GLib.find_program_in_path('ufw');
+            if (bin) {
+                const r = await run([bin, 'status']);
+                const out = r.stdout;
+                if (out.toLowerCase().includes('status: active'))
+                    active = true;
+                else if (out.toLowerCase().includes('status: inactive'))
+                    active = false;
+
+                const def = out.match(/Default:\s*(.+)/i);
+                if (def) {
+                    const a = def[1].match(/(\w+)\s*\(incoming\)/i);
+                    const b = def[1].match(/(\w+)\s*\(outgoing\)/i);
+                    if (a)
+                        incoming = a[1];
+                    if (b)
+                        outgoing = b[1];
                 }
-            }
 
-            const on = await this._readConf();
-            if (on !== null) {
-                this._show({
-                    active: on,
-                    incoming: '—',
-                    outgoing: '—',
-                    rules: [],
-                }, '/etc/ufw/ufw.conf');
-                if (ufw)
-                    this._note.label.text = 'Limited view (need permission for full status)';
-                return;
-            }
+                for (const line of out.split('\n')) {
+                    const t = line.trim();
+                    if (!t || /^(Status|Default|To\s+Action|Logging|--)/i.test(t))
+                        continue;
+                    if (t.length > 4)
+                        rules.push(t);
+                }
 
-            this._show({active: null, incoming: '—', outgoing: '—', rules: []}, 'not found');
-            this._note.label.text = 'UFW not found';
+                if (active === null) {
+                    const conf = await this._readConf();
+                    if (conf !== null) {
+                        active = conf;
+                        note = 'limited (no permission for full status)';
+                    }
+                }
+            } else {
+                const conf = await this._readConf();
+                if (conf !== null)
+                    active = conf;
+                else
+                    note = 'ufw not found';
+            }
         } catch (e) {
-            logError(e, 'UFW Status refresh failed');
-            this._note.label.text = String(e.message || e).slice(0, 48);
-        } finally {
-            this._busy = false;
+            note = String(e.message || e).slice(0, 40);
+            logError(e);
         }
-    }
 
-    _show(info, source) {
-        if (info.active === true) {
-            this._fw.set('ACTIVE', 'ufw-ok');
-            this._label.text = 'ON';
-            this._label.style_class = 'ufw-panel-label ufw-ok';
+        if (active === true) {
+            this._state.label.text = 'Firewall: ACTIVE';
+            this._text.text = 'ON';
             this._icon.icon_name = 'security-high-symbolic';
-        } else if (info.active === false) {
-            this._fw.set('INACTIVE', 'ufw-danger');
-            this._label.text = 'OFF';
-            this._label.style_class = 'ufw-panel-label ufw-danger';
+        } else if (active === false) {
+            this._state.label.text = 'Firewall: INACTIVE';
+            this._text.text = 'OFF';
             this._icon.icon_name = 'security-low-symbolic';
         } else {
-            this._fw.set('unknown', 'ufw-warn');
-            this._label.text = 'UFW';
-            this._label.style_class = 'ufw-panel-label ufw-warn';
+            this._state.label.text = 'Firewall: ?';
+            this._text.text = 'UFW';
             this._icon.icon_name = 'security-medium-symbolic';
         }
-
-        this._in.set(info.incoming, info.incoming === 'deny' ? 'ufw-ok' : 'ufw-warn');
-        this._out.set(info.outgoing);
-        this._src.set(source);
+        this._in.label.text = `Incoming: ${incoming}`;
+        this._out.label.text = `Outgoing: ${outgoing}`;
 
         this._rules.removeAll();
-        const rules = info.rules.slice(0, 30);
         if (!rules.length) {
-            const empty = new PopupMenu.PopupMenuItem(
-                info.active === false ? 'No rules (firewall off)' : 'No rules to show',
-                {reactive: false, can_focus: false}
-            );
-            empty.label.add_style_class_name('ufw-hint');
-            this._rules.addMenuItem(empty);
+            this._rules.addMenuItem(new PopupMenu.PopupMenuItem(
+                active === false ? '(firewall off)' : '(no rules listed)',
+                {reactive: false}));
         } else {
-            for (const rule of rules) {
-                const item = new PopupMenu.PopupMenuItem(rule, {
-                    reactive: false, can_focus: false,
-                });
-                item.label.add_style_class_name('ufw-rule');
-                item.label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-                this._rules.addMenuItem(item);
+            for (const rule of rules.slice(0, 25)) {
+                const mi = new PopupMenu.PopupMenuItem(rule, {reactive: false});
+                mi.label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+                this._rules.addMenuItem(mi);
             }
         }
 
-        const note = this._note.label.text || '';
-        if (!note.startsWith('Limited') && !note.startsWith('UFW not') && !note.startsWith('Error'))
-            this._note.label.text = `Updated ${GLib.DateTime.new_now_local().format('%H:%M:%S')}`;
+        this._footer.label.text = note ||
+            GLib.DateTime.new_now_local().format('updated %H:%M:%S');
     }
-}
+});
 
-export default class UfwStatusExtension extends Extension {
+export default class extends Extension {
     enable() {
-        this._indicator = new Indicator();
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
-        this._indicator.start();
+        this._btn = new Indicator();
+        Main.panel.addToStatusArea(this.uuid, this._btn);
     }
 
     disable() {
-        this._indicator.destroy();
-        this._indicator = null;
+        this._btn.destroy();
+        this._btn = null;
     }
 }
